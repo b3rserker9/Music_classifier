@@ -4,13 +4,11 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 import matplotlib.pyplot as plt
 import librosa
-import librosa.display
 import pandas as pd
 import numpy as np
 import os
 import re
 import logging
-import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +41,7 @@ def load_dynamic_file(path, label_type="valence"):
 # Preprocessing audio + labels
 # =========================================================
 sr = 44100
-segment_length = 5
+segment_length = 1     # <--- finestra più corta (1s)
 segment_samples = segment_length * sr
 X_by_song, y_by_song = {}, {}
 audio_files = sorted([f for f in os.listdir(audio_dir) if f.endswith(".mp3")])
@@ -124,36 +122,56 @@ X_train, X_val, X_test = np.expand_dims(X_train, -1), np.expand_dims(X_val, -1),
 # =========================================================
 # Normalizzazione labels
 # =========================================================
-from sklearn.preprocessing import MinMaxScaler
 scaler = MinMaxScaler((0, 1))
 y_train_n = scaler.fit_transform(y_train.reshape(-1, 2)).reshape(y_train.shape)
 y_val_n = scaler.transform(y_val.reshape(-1, 2)).reshape(y_val.shape)
 y_test_n = scaler.transform(y_test.reshape(-1, 2)).reshape(y_test.shape)
 
 # =========================================================
-# Modello CNN
+# Modello CNN + GRU
 # =========================================================
 _, n_mels, n_frames, _ = X_train.shape
+
 model = models.Sequential([
     layers.Input(shape=(n_mels, n_frames, 1)),
+
+    # CNN
     layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
     layers.BatchNormalization(),
     layers.MaxPooling2D((2, 2)),
+
     layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
     layers.BatchNormalization(),
     layers.MaxPooling2D((2, 2)),
+
     layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
     layers.BatchNormalization(),
-    layers.GlobalAveragePooling2D(),
-    layers.Dense(256, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(2, activation='sigmoid')
+    layers.Dropout(0.3),
+
+    # Reshape per sequenza
+    layers.Reshape((n_frames // 4, (n_mels // 4) * 128)),
+
+    # GRU
+    layers.GRU(128, return_sequences=False),
+    layers.Dropout(0.3),
+
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.3),
+
+    # Output lineare
+    layers.Dense(2, activation='linear')
 ])
 
-model.compile(optimizer='adam', loss='mae', metrics=['mae'])
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+    loss='mse',
+    metrics=['mae']
+)
+
+model.summary()
 
 # =========================================================
-# Training con early stopping "stabile"
+# Training con callback
 # =========================================================
 callbacks = [
     tf.keras.callbacks.EarlyStopping(
@@ -161,7 +179,7 @@ callbacks = [
         restore_best_weights=True, verbose=1
     ),
     tf.keras.callbacks.ModelCheckpoint(
-        "best_model_dynamic_early_stop.keras", monitor="val_loss",
+        "best_model_dynamic.keras", monitor="val_loss",
         save_best_only=True, verbose=1
     ),
     tf.keras.callbacks.ReduceLROnPlateau(
@@ -197,10 +215,10 @@ print(f"Test RMSE (original scale) - Valence: {rmse_valence:.4f}, Arousal: {rmse
 # =========================================================
 plt.figure(figsize=(12, 4))
 plt.subplot(1, 2, 1)
-plt.plot(history.history['loss'], label='Train Loss (MAE)')
-plt.plot(history.history['val_loss'], label='Val Loss (MAE)')
+plt.plot(history.history['loss'], label='Train Loss (MSE)')
+plt.plot(history.history['val_loss'], label='Val Loss (MSE)')
 plt.title('Training vs Validation Loss')
-plt.xlabel('Epoch'); plt.ylabel('MAE'); plt.legend()
+plt.xlabel('Epoch'); plt.ylabel('MSE'); plt.legend()
 
 plt.subplot(1, 2, 2)
 plt.plot(history.history['mae'], label='Train MAE')
